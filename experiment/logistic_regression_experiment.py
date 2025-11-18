@@ -1,228 +1,260 @@
-# Experiment Pipeline for Evaluating Custom Logistic Regression (GD Variant)
-# ============================================================================
-# This script integrates full preprocessing (duplicate removal, imputation,
-# categorical encoding, SMOTE balancing, feature scaling), model training using
-# gradient descent, comprehensive evaluation, and result logging.
-# Compatible with custom LogisticRegressionGD implementation.
+"""
+UNIVERSAL EXPERIMENT PIPELINE
+==============================
+
+This pipeline is designed to automatically process and evaluate datasets
+from two distinct medical classification domains:
+
+1. Indian Liver Patient Dataset (Binary classification)
+2. Cirrhosis Dataset (Multi-class classification, Stage 1–4)
+
+The system automatically:
+- Detects label type (binary or multi-class)
+- Applies appropriate preprocessing
+- Encodes categorical variables
+- Handles missing values
+- Applies SMOTE only for binary imbalanced tasks
+- Selects scaler dynamically through a scaling factory
+- Trains a custom Logistic Regression model (GD variant)
+- Computes relevant evaluation metrics
+- Stores experiment results into CSV
+
+The pipeline is fully compatible with LogisticRegressionGD (custom implementation).
+"""
 
 import os
+import sys
 import time
 import numpy as np
 import pandas as pd
-import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from sklearn.preprocessing import (
     StandardScaler, MinMaxScaler, RobustScaler,
-    Normalizer, QuantileTransformer, MaxAbsScaler,
-    LabelEncoder, OneHotEncoder
+    Normalizer, MaxAbsScaler, QuantileTransformer,
+    LabelEncoder
 )
-from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
+    roc_auc_score, average_precision_score, accuracy_score,
     matthews_corrcoef, f1_score, precision_score, recall_score,
-    accuracy_score, roc_auc_score, average_precision_score
+    classification_report
 )
 from imblearn.over_sampling import SMOTE
 from src.logistic_regression import LogisticRegressionGD
 
 
-# ================================================================
-# Scaler Factory
-# ================================================================
+# ===========================================================================
+# Scaler Factory: Centralized selector for all supported scaling techniques
+# ===========================================================================
 def get_scaler(name: str):
+    """
+    Returns a scaler object based on the provided name.
+    Allows flexible switching between normalization techniques.
+
+    Supported:
+        - StandardScaler
+        - MinMaxScaler
+        - RobustScaler
+        - Normalizer
+        - MaxAbsScaler
+        - QuantileTransformer (Gaussian output distribution)
+    """
     scalers = {
         "StandardScaler": StandardScaler(),
         "MinMaxScaler": MinMaxScaler(),
         "RobustScaler": RobustScaler(),
         "Normalizer": Normalizer(),
-        "QuantileTransformer": QuantileTransformer(output_distribution="normal", random_state=42),
         "MaxAbsScaler": MaxAbsScaler(),
+        "QuantileTransformer": QuantileTransformer(
+            output_distribution="normal", random_state=42
+        ),
         None: None
     }
-    scaler = scalers.get(name)
-    if scaler is None and name is not None:
-        raise ValueError(f"Scaler {name} is not supported.")
-    return scaler
+    if name not in scalers:
+        raise ValueError(f"Unsupported scaler: {name}")
+    return scalers[name]
 
 
-def preprocessing_data(
+# ===========================================================================
+# UNIVERSAL PREPROCESSING MODULE
+# ===========================================================================
+def universal_preprocessing(
     path: str,
-    label: str = "Result",
-    fillNaNValue: str = "mean",
-    scaler: str = "StandardScaler",
-    removeDuplicate: bool = True,
-    applySMOTE: bool = True,
-    test_size: float = 0.2,
-    random_state: int = 42
+    scaler="StandardScaler",
+    applySMOTE=True,
+    random_state=42
 ):
-    print(f"Loading dataset from: {path}")
+    """
+    Universal preprocessing engine that detects dataset type (binary or multi-class),
+    handles missing values, encodes categorical variables, performs stratified splitting,
+    and applies SMOTE for binary imbalance correction.
+    """
+
+    print(f"\n[INFO] Loading dataset: {os.path.basename(path)}")
     df = pd.read_csv(path)
-    print(f"Initial shape: {df.shape}")
 
-    # Auto-detect label column if missing
-    if label not in df.columns:
-        possible_labels = ["Result", "Dataset", "Class", "selector", "target", "Label", "diagnosis"]
-        for col in possible_labels:
-            if col in df.columns:
-                label = col
-                print(f"Detected label column: {label}")
-                break
-        else:
-            raise ValueError(f"Label column not found. Available columns: {list(df.columns)}")
+    # --- Identify label column automatically ---
+    possible_labels = ["Result", "Dataset", "Class", "selector", "target", "Stage", "status", "Diagnosis"]
+    label_col = next((c for c in possible_labels if c in df.columns), None)
+    if label_col is None:
+        raise ValueError("Label column not found in dataset.")
 
-    # Normalize label values to {0,1}
-    raw_label = df[label].copy()
-    unique_vals = sorted(raw_label.dropna().unique())
+    y_raw = df[label_col].copy()
 
-    if len(unique_vals) == 2:
-        if set(unique_vals) == {1, 2}:
-            df[label] = df[label].map({1: 0, 2: 1})
-        elif set(unique_vals) == {0, 1}:
-            df[label] = df[label].astype(int)
-        else:
-            df[label] = (df[label] == max(unique_vals)).astype(int)
+    # --- Task identification logic ---
+    if label_col == "Stage" or len(np.unique(y_raw)) > 2:
+        task = "multiclass"
+        y = y_raw.values
+        n_classes = len(np.unique(y))
     else:
-        raise ValueError(f"Label contains more than two classes: {unique_vals}")
+        task = "binary"
+        n_classes = 2
+        if set(y_raw.unique()) == {1, 2}:
+            y = (y_raw == 2).astype(int)
+        elif set(y_raw.unique()) == {0, 1}:
+            y = y_raw.astype(int)
+        else:
+            pos = y_raw.max()
+            y = (y_raw == pos).astype(int)
 
-    # Remove rows with NaN labels
-    df = df.dropna(subset=[label]).reset_index(drop=True)
+    # --- Remove NaN labels (if any) ---
+    if y_raw.isnull().sum() > 0:
+        df = df.dropna(subset=[label_col]).reset_index(drop=True)
 
-    # Remove duplicates
-    if removeDuplicate:
-        df = df.drop_duplicates().reset_index(drop=True)
+    X = df.drop(columns=[label_col])
 
-    y = df[label].astype(int)
-    X = df.drop(columns=[label])
-
-    # Identify numeric and categorical columns
-    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    # --- Encode categorical variables ---
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
+    for col in cat_cols:
+        X[col] = LabelEncoder().fit_transform(X[col].astype(str))
 
-    # Impute missing values
+    # --- Numerical imputation ---
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     if num_cols:
-        X[num_cols] = SimpleImputer(strategy=fillNaNValue).fit_transform(X[num_cols])
-    if cat_cols:
-        X[cat_cols] = SimpleImputer(strategy="most_frequent").fit_transform(X[cat_cols])
+        X[num_cols] = SimpleImputer(strategy="mean").fit_transform(X[num_cols])
 
-    # Categorical encoding
-    binary_cols = [c for c in cat_cols if X[c].nunique() <= 2]
-    multi_cols = [c for c in cat_cols if X[c].nunique() > 2]
+    # --- Scaling ---
+    scaler_obj = get_scaler(scaler)
+    if scaler_obj is not None:
+        X = scaler_obj.fit_transform(X)
 
-    for c in binary_cols:
-        X[c] = LabelEncoder().fit_transform(X[c])
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y, dtype=int)
 
-    if multi_cols:
-        ohe = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-        ohe_data = ohe.fit_transform(X[multi_cols])
-        ohe_cols = ohe.get_feature_names_out(multi_cols)
-        X = X.drop(columns=multi_cols)
-        X[ohe_cols] = ohe_data
-
-    # Train-test split
+    # --- Train-test split ---
+    strat = y if task == "binary" else None
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state, stratify=y
+        X, y,
+        test_size=0.2,
+        random_state=random_state,
+        stratify=strat
     )
 
-    # SMOTE balancing
-    if applySMOTE:
+    # --- SMOTE for binary imbalance ---
+    if applySMOTE and task == "binary":
         X_train, y_train = SMOTE(random_state=random_state).fit_resample(X_train, y_train)
 
-    # Feature scaling
-    scaler_obj = get_scaler(scaler)
-    if scaler_obj:
-        X_train = scaler_obj.fit_transform(X_train)
-        X_test = scaler_obj.transform(X_test)
-
-    # Convert to numpy
-    return (
-        np.asarray(X_train, dtype=np.float64),
-        np.asarray(y_train, dtype=int),
-        np.asarray(X_test, dtype=np.float64),
-        np.asarray(y_test, dtype=int),
-    )
+    print(f"[INFO] Task: {task.upper()} | Classes: {n_classes}")
+    return X_train, y_train, X_test, y_test, task
 
 
-def evaluate_model(y_true, y_pred, y_scores):
-    y_true = np.ravel(y_true).astype(int)
-    y_pred = np.ravel(y_pred).astype(int)
-    y_scores = np.ravel(y_scores)
+# ===========================================================================
+# EVALUATION MODULE
+# ===========================================================================
+def evaluate(y_true, y_pred, y_scores, task):
+    """
+    Evaluation module for both binary and multi-class classification tasks.
+    Computes all relevant metrics depending on task type.
+    """
 
-    auc_roc = roc_auc_score(y_true, y_scores) * 100
-    auc_pr = average_precision_score(y_true, y_scores) * 100
     acc = accuracy_score(y_true, y_pred) * 100
-    mcc = matthews_corrcoef(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred, pos_label=1, zero_division=0)
-    precision = precision_score(y_true, y_pred, pos_label=1, zero_division=0)
-    recall = recall_score(y_true, y_pred, pos_label=1, zero_division=0)
 
-    print("Evaluation completed.")
-    return [auc_roc, auc_pr, acc, mcc, f1, precision, recall]
+    if task == "binary":
+        auc_roc = roc_auc_score(y_true, y_scores) * 100
+        auc_pr = average_precision_score(y_true, y_scores) * 100
+        mcc = matthews_corrcoef(y_true, y_pred)
+        f1v = f1_score(y_true, y_pred)
+        precision = precision_score(y_true, y_pred)
+        recall = recall_score(y_true, y_pred)
+
+        return [auc_roc, auc_pr, acc, mcc, f1v, precision, recall]
+
+    # Multiclass metrics
+    f1_macro = f1_score(y_true, y_pred, average="macro")
+    return [acc, f1_macro, ]
 
 
+# ===========================================================================
+# MAIN EXECUTION PIPELINE
+# ===========================================================================
 if __name__ == "__main__":
-    DATASET_PATH = "../data/processed/liver_cleaned.csv"
-    OUTPUT_CSV = "../experiment_result/logistic_regression_experiment_result.csv"
+    # DATASET_PATH = "../data/processed/icirrhosis_encoded.csv"
+    # OUTPUT_CSV = "../experiment_result/logistic_regression_cirhosis_result.csv"
 
-    PREPROCESSING_CONFIG = {
-        "fillNaNValue": "mean",
-        "label": "Result",
-        "scaler": "RobustScaler",
-        "removeDuplicate": True,
-        "applySMOTE": True,
-    }
+    DATASET_PATH = "../data/processed/liver_cleaned.csv" 
+    OUTPUT_CSV = "../experiment_result/logistic_regression_indian_liver_patient_result.csv"
 
-    MODEL_CONFIG = {
-        "eta": 0.8,
-        "epochs": 2000,
-        "threshold": 1e-4,
-        "verbose": True,
-    }
-
-    columns = [
-        "Dataset", "Model", "AUCROC", "AUCPR", "Accuracy",
-        "MCC", "F1 Score", "Precision", "Recall",
-        "Time Train", "Time Test"
+    SCALERS = [
+        "StandardScaler",
+        "MinMaxScaler",
+        "RobustScaler",
+        "Normalizer",
+        "MaxAbsScaler",
+        "QuantileTransformer"
     ]
+
+    etas = [10, 8, 5, 3, 1, 0.8, 0.5, 0.3, 0, -0.3, -0.5, -0.8, -1]
+
     if not os.path.exists(OUTPUT_CSV):
-        pd.DataFrame(columns=columns).to_csv(OUTPUT_CSV, index=False)
+        with open(OUTPUT_CSV, "w") as f:
+            f.write(
+                "Dataset,Task,AUCROC,AUCPR,Accuracy,MCC,F1,Precision,Recall,"
+                "Time_Train,Time_Test,Eta,Scaler\n"
+            )
+            # f.write(
+            #     "Dataset,Task,Accuracy,F1 macro,"
+            #     "Time_Train,Time_Test,Eta,Scaler\n"
+            # )
 
-    print("Starting experiment with Logistic Regression GD...")
+    for scaler in SCALERS:
+        for eta in etas:
 
-    # Data preprocessing
-    X_train, y_train, X_test, y_test = preprocessing_data(
-        path=DATASET_PATH,
-        **PREPROCESSING_CONFIG,
-    )
+            print(f"\n=== RUNNING: Scaler={scaler}, eta={eta} ===")
 
-    # Model initialization
-    model = LogisticRegressionGD(**MODEL_CONFIG)
+            # Preprocessing
+            X_train, y_train, X_test, y_test, task = universal_preprocessing(
+                path=DATASET_PATH,
+                scaler=scaler,
+                applySMOTE=True
+            )
 
-    # Training
-    t0 = time.time()
-    model.fit(X_train, y_train)
-    t1 = time.time()
-    train_time = t1 - t0
+            model = LogisticRegressionGD(eta=eta, epochs=3000, verbose=False)
 
-    # Prediction
-    y_scores = model.predict_proba(X_test).flatten()
-    y_pred = model.predict(X_test).flatten()
-    t2 = time.time()
-    test_time = t2 - t1
+            start_train = time.time()
+            model.fit(X_train, y_train)
+            end_train = time.time()
 
-    # Evaluation
-    metrics = evaluate_model(y_test, y_pred, y_scores)
+            y_scores = model.predict_proba(X_test).flatten()
+            y_pred = model.predict(X_test).flatten()
+            end_test = time.time()
 
-    # Save results
-    result_row = [
-        os.path.basename(DATASET_PATH),
-        "LogisticRegressionGD",
-        *metrics,
-        train_time,
-        test_time
-    ]
+            metrics = evaluate(y_test, y_pred, y_scores, task)
 
-    pd.DataFrame([result_row], columns=columns).to_csv(
-        OUTPUT_CSV, mode='a', header=False, index=False
-    )
+            row = [
+                os.path.basename(DATASET_PATH),
+                task
+            ] + metrics + [
+                end_train - start_train,
+                end_test - end_train,
+                eta,
+                scaler
+            ]
+
+            pd.DataFrame([row]).to_csv(
+                OUTPUT_CSV, mode="a", header=False, index=False
+            )
+
+            print(f"[INFO] Saved: scaler={scaler}, eta={eta}")
+
