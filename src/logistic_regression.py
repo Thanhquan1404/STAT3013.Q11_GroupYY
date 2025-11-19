@@ -15,14 +15,12 @@ class LogisticRegressionGD:
         self.b = None
         self.loss_history = []
 
-    # ------------------------------------------------------------------
     @staticmethod
     def sigmoid(z):
         """Numerically stable sigmoid."""
         z = np.clip(z, -500, 500)
         return 1 / (1 + np.exp(-z))
 
-    # ------------------------------------------------------------------
     def fit(self, X_train, y_train, X_val=None, y_val=None):
         m, n = X_train.shape
         self.w = np.zeros((n, 1))
@@ -66,29 +64,23 @@ class LogisticRegressionGD:
 
         print(f"🏁 Training completed after {epoch+1} epochs. Final Loss: {loss:.6f}")
 
-    # ------------------------------------------------------------------
     def predict_proba(self, X):
         """Return predicted probability."""
         return self.sigmoid(np.dot(X, self.w) + self.b)
 
-    # ------------------------------------------------------------------
     def predict(self, X, threshold=0.5):
         """Return class predictions (0 or 1)."""
         return (self.predict_proba(X) >= threshold).astype(int)
 
-    # ------------------------------------------------------------------
     def score(self, X, y):
         """Return accuracy."""
         y_pred = self.predict(X)
         return np.mean(y_pred.flatten() == y.flatten())
 
-    # ------------------------------------------------------------------
     def get_loss_history(self):
         return np.array(self.loss_history)
 
-    # ------------------------------------------------------------------
     def get_params(self):
-        """Return model hyperparameters (sklearn style)."""
         return {
             "eta": self.eta,
             "epochs": self.epochs,
