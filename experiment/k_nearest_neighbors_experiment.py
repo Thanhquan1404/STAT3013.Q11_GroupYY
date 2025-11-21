@@ -133,8 +133,9 @@ if __name__ == "__main__":
     # Header CSV (chỉ ghi lần đầu)
     if not os.path.exists(OUTPUT_CSV):
         header = (
-            "Dataset,Task,K,Weights,Metric,P,Best_CV_Acc,Test_Accuracy,Test_F1_Weighted,Test_F1_Macro,"
-            "Train_Time_s,Test_Time_s,Scaler,Timestamp\n"
+        "Dataset,Task,K,Weights,Metric,P,Best_CV_Acc,Test_Accuracy,Test_F1_Weighted,Test_F1_Macro,"
+        "Test_Precision_Weighted,Test_Recall_Weighted,"
+        "Train_Time_s,Test_Time_s,Scaler,Timestamp\n"
         )
         with open(OUTPUT_CSV, "w") as f:
             f.write(header)
@@ -193,10 +194,14 @@ if __name__ == "__main__":
             test_time = time.time() - start_test
 
             # Metrics
+            # Metrics
             report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-            test_acc = report["accuracy"]
-            test_f1w = report["weighted avg"]["f1-score"]
-            test_f1m = report.get("macro avg", {}).get("f1-score", f1_score(y_test, y_pred, average="macro"))
+
+            test_acc        = report["accuracy"]
+            test_f1w        = report["weighted avg"]["f1-score"]
+            test_f1m        = report["macro avg"]["f1-score"]
+            test_precision_w = report["weighted avg"]["precision"]   # ← MỚI
+            test_recall_w    = report["weighted avg"]["recall"]      # ← MỚI
 
             # Lưu kết quả
             row = [
@@ -210,6 +215,8 @@ if __name__ == "__main__":
                 round(test_acc, 4),
                 round(test_f1w, 4),
                 round(test_f1m, 4),
+                round(test_precision_w, 4),   
+                 round(test_recall_w, 4),      
                 round(train_time, 4),
                 round(test_time, 4),
                 scaler_name,
@@ -223,4 +230,3 @@ if __name__ == "__main__":
 
     print(f"\nHOÀN TẤT! Tất cả kết quả KNN đã được lưu tại:")
     print(f"   → {OUTPUT_CSV}")
-    print("   Bây giờ bạn có bảng so sánh đầy đủ: Logistic → SVM → RF → KNN!")

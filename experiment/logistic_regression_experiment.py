@@ -190,11 +190,11 @@ def evaluate(y_true, y_pred, y_scores, task):
 # MAIN EXECUTION PIPELINE
 # ===========================================================================
 if __name__ == "__main__":
-    DATASET_PATH = "../data/processed/indian_liver_patient_preprocessed.csv"
-    OUTPUT_CSV = "../experiment_result/logistic_regression_indian_liver_patient_result.csv"
+    # DATASET_PATH = "../data/processed/indian_liver_patient_preprocessed.csv"
+    # OUTPUT_CSV = "../experiment_result/logistic_regression_indian_liver_patient_result.csv"
 
-    # DATASET_PATH = "../data/processed/liver_cirrhosis_preprocessed.csv"
-    # OUTPUT_CSV = "../experiment_result/logistic_regression_liver_cirrhosis_result.csv"
+    DATASET_PATH = "../data/processed/liver_cirrhosis_preprocessed.csv"
+    OUTPUT_CSV = "../experiment_result/logistic_regression_liver_cirrhosis_result.csv"
 
     SCALERS = [
         "StandardScaler",

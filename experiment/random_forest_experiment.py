@@ -122,19 +122,20 @@ def universal_preprocessing(
 # ===========================================================================
 if __name__ == "__main__":
 
-    # DATASET_PATH = "../data/processed/indian_liver_patient_preprocessed.csv"
-    # OUTPUT_CSV = "../experiment_result/random_forest_indian_liver_patient_result.csv"
+    DATASET_PATH = "../data/processed/indian_liver_patient_preprocessed.csv"
+    OUTPUT_CSV = "../experiment_result/random_forest_indian_liver_patient_result.csv"
 
-    DATASET_PATH = "../data/processed/liver_cirrhosis_preprocessed.csv"
-    OUTPUT_CSV = "../experiment_result/random_forest_liver_cirrhosis_result.csv"
+    # DATASET_PATH = "../data/processed/liver_cirrhosis_preprocessed.csv"
+    # OUTPUT_CSV = "../experiment_result/random_forest_liver_cirrhosis_result.csv"
 
     os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
 
     # Header CSV (chỉ ghi 1 lần)
     if not os.path.exists(OUTPUT_CSV):
         header = (
-            "Dataset,Task,n_estimators,max_depth,min_samples_split,min_samples_leaf,max_features,"
-            "Test_Accuracy,Test_F1_Weighted,Test_F1_Macro,Train_Time_s,Test_Time_s,Scaler,Timestamp\n"
+            "Dataset,Task,K,Weights,Metric,P,Best_CV_Acc,Test_Accuracy,Test_F1_Weighted,Test_F1_Macro,"
+            "Test_Precision_Weighted,Test_Recall_Weighted,"
+            "Train_Time_s,Test_Time_s,Scaler,Timestamp\n"
         )
         with open(OUTPUT_CSV, "w") as f:
             f.write(header)
@@ -187,9 +188,12 @@ if __name__ == "__main__":
 
             # Metrics
             report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-            acc = report["accuracy"]
-            f1_weighted = report["weighted avg"]["f1-score"]
-            f1_macro = report["macro avg"]["f1-score"] if "macro avg" in report else f1_score(y_test, y_pred, average="macro")
+
+            test_acc        = report["accuracy"]
+            test_f1w        = report["weighted avg"]["f1-score"]
+            test_f1m        = report["macro avg"]["f1-score"]
+            test_precision_w = report["weighted avg"]["precision"]   
+            test_recall_w    = report["weighted avg"]["recall"]      
 
             # Lưu kết quả
             row = [
@@ -200,9 +204,11 @@ if __name__ == "__main__":
                 cfg["min_samples_split"],
                 cfg["min_samples_leaf"],
                 str(cfg["max_features"]),
-                round(acc, 4),
-                round(f1_weighted, 4),
-                round(f1_macro, 4),
+                round(test_acc, 4),
+                round(test_f1w, 4),
+                round(test_f1m, 4),
+                round(test_precision_w, 4),   # ← Thêm Precision Weighted
+                round(test_recall_w, 4),      # ← Thêm Recall Weighted
                 round(train_time, 4),
                 round(test_time, 4),
                 scaler_name,
@@ -211,7 +217,7 @@ if __name__ == "__main__":
 
             pd.DataFrame([row]).to_csv(OUTPUT_CSV, mode="a", header=False, index=False)
 
-            print(f"SAVED | Acc: {acc:.4f} | F1w: {f1_weighted:.4f} | F1m: {f1_macro:.4f}")
+            print(f"SAVED | Acc: {test_acc:.4f} | F1w: {test_f1w:.4f} | F1m: {test_f1m:.4f}")
             print(f"Time → Train: {train_time:.2f}s | Test: {test_time:.4f}s\n")
 
     print(f"\nHOÀN TẤT! Tất cả kết quả Random Forest đã được lưu tại:")
