@@ -1,0 +1,7 @@
+Scaler,k,ACC
+NoScaler,7,0.6909
+StandardScaler,5,0.6897
+NoScaler,5,0.686
+NoScaler,3,0.6847
+StandardScaler,7,0.6737
+StandardScaler,3,0.6699
