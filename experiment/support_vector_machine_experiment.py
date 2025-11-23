@@ -1,250 +1,352 @@
-# ====================================================================
-# UNIVERSAL EXPERIMENT PIPELINE – SUPPORT VECTOR MACHINE (Custom SVM)
-# Academic / Research-Grade | Fully Automatic | Binary & Multiclass
-# ====================================================================
-"""
-UNIVERSAL SVM EXPERIMENT PIPELINE
-=================================
-• Tự động nhận diện dataset (Indian Liver vs Cirrhosis)
-• Tự động phát hiện nhãn + task (binary/multiclass)
-• Universal preprocessing + 7 scalers
-• SMOTE chỉ dùng cho binary
-• Grid đầy đủ: linear, rbf, poly + C + gamma + degree
-• Đo thời gian chính xác, lưu CSV chuẩn để so sánh với KNN/RF/Logistic
-"""
-
+# SVM_experiment.py
 import os
-import sys
-import time
-import numpy as np
 import pandas as pd
+import numpy as np
+import sys
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, Normalizer
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
+                             roc_auc_score, confusion_matrix, roc_curve, auc)
+import warnings
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+warnings.filterwarnings("ignore")
 
-# Thêm project root vào path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Import class SVM đã fix calibration
+from models.Support_Vector_Machine import UnifiedSVMClassifier
 
-from sklearn.preprocessing import LabelEncoder
-from sklearn.impute import SimpleImputer
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import classification_report, f1_score
-from imblearn.over_sampling import SMOTE
-from src.svm import SVMClassifier
 
-# ===========================================================================
-# Scaler Factory (đồng bộ với KNN)
-# ===========================================================================
-def get_scaler(name: str):
-    from sklearn.preprocessing import (
-        StandardScaler, MinMaxScaler, RobustScaler,
-        Normalizer, MaxAbsScaler, QuantileTransformer
-    )
-    scalers = {
-        "StandardScaler": StandardScaler(),
-        "MinMaxScaler": MinMaxScaler(),
-        "RobustScaler": RobustScaler(),
-        "Normalizer": Normalizer(),
-        "MaxAbsScaler": MaxAbsScaler(),
-        "QuantileTransformer": QuantileTransformer(output_distribution="normal", random_state=42),
-        None: None
-    }
-    return scalers.get(name, None)
-
-# ===========================================================================
-# UNIVERSAL PREPROCESSING (không leakage, chuẩn research)
-# ===========================================================================
-def universal_preprocessing(
-    path: str,
-    scaler_name="StandardScaler",
-    apply_smote=True,
-    random_state=42
+def SVM_experiment(
+    output_file_name,
+    train_path,
+    test_path,
+    output_dir,
+    label_col='Dataset',
+    index_col=None,
+    scalers=None,
+    random_state=42,
+    multiclass=False  # Tự động detect, nhưng vẫn giữ tham số để override nếu cần
 ):
-    print(f"\n[INFO] Loading dataset: {os.path.basename(path)}")
-    df = pd.read_csv(path)
+    """
+    Thí nghiệm SVM - Hỗ trợ cả Binary và Multiclass
+    """
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Auto-detect label column
-    possible_labels = ["Result", "Dataset", "Class", "selector", "target", "Stage", "status", "Diagnosis"]
-    label_col = next((c for c in possible_labels if c in df.columns), None)
-    if label_col is None:
-        raise ValueError("Không tìm thấy cột nhãn!")
+    # Đọc dữ liệu
+    train_df = pd.read_csv(train_path, index_col=index_col)
+    test_df  = pd.read_csv(test_path, index_col=index_col)
 
-    y_raw = df[label_col].copy()
+    X_train = train_df.drop(columns=[label_col])
+    y_train = train_df[label_col]
+    X_test  = test_df.drop(columns=[label_col])
+    y_test  = test_df[label_col]
 
-    # Task detection
-    unique_vals = np.unique(y_raw.dropna())
-    if len(unique_vals) > 2 or label_col == "Stage":
-        task = "multiclass"
-        y = y_raw.astype(int).values
-        n_classes = len(unique_vals)
-    else:
-        task = "binary"
-        n_classes = 2
-        pos_label = y_raw.max()
-        y = (y_raw == pos_label).astype(int).values
+    # Tự động phát hiện multiclass
+    n_classes = len(np.unique(y_train))
+    is_multiclass = n_classes > 2
+    if multiclass:
+        is_multiclass = True
 
-    # Drop missing label rows
-    df = df.dropna(subset=[label_col]).reset_index(drop=True)
+    print(f"Phát hiện: {'Multiclass' if is_multiclass else 'Binary'} classification ({n_classes} classes)")
 
-    X = df.drop(columns=[label_col])
+    # Chuẩn hóa nhãn về 0,1,2,... nếu cần (đặc biệt với Stage 1,2,3,4)
+    if y_train.min() >= 1:
+        y_train = y_train - y_train.min()
+        y_test = y_test - y_test.min()
 
-    # Encode categorical
-    cat_cols = X.select_dtypes(include=["object", "category"]).columns
-    for col in cat_cols:
-        le = LabelEncoder()
-        X[col] = le.fit_transform(X[col].astype(str).fillna("Missing"))
+    classes = sorted(np.unique(y_train))
+    class_names = [f"Class {c}" for c in classes]
 
-    # Impute numerical
-    num_cols = X.select_dtypes(include=[np.number]).columns
-    if len(num_cols) > 0:
-        imputer = SimpleImputer(strategy="mean")
-        X[num_cols] = imputer.fit_transform(X[num_cols])
+    # Danh sách scaler
+    if scalers is None:
+        scalers = {
+            'NoScaler': None,
+            'StandardScaler': StandardScaler(),
+            'MinMaxScaler': MinMaxScaler(),
+            'RobustScaler': RobustScaler(),
+            'Normalizer': Normalizer()
+        }
 
-    # Scaling
-    scaler = get_scaler(scaler_name)
-    if scaler is not None:
-        X = scaler.fit_transform(X)
+    # Danh sách model
+    models = {
+        'LinearSVC': UnifiedSVMClassifier(svm_type="linear_svc", C=1.0, calibration=True, random_state=random_state),
+        'SGD_Hinge': UnifiedSVMClassifier(svm_type="sgd", loss="hinge", alpha=0.0001, calibration=True, random_state=random_state),
+        'SGD_SqHinge': UnifiedSVMClassifier(svm_type="sgd", loss="squared_hinge", alpha=0.0001, calibration=True, random_state=random_state),
+    }
 
-    X = np.asarray(X, dtype=np.float64)
-    y = np.asarray(y, dtype=int)
+    results = []
 
-    # Stratified split
-    stratify = y if n_classes >= 2 else None
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=random_state, stratify=stratify
-    )
+    for scaler_name, scaler in scalers.items():
+        if scaler is not None:
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled  = scaler.transform(X_test)
+        else:
+            X_train_scaled = X_train.values if isinstance(X_train, pd.DataFrame) else X_train
+            X_test_scaled  = X_test.values if isinstance(X_test, pd.DataFrame) else X_test
 
-    # SMOTE chỉ cho binary
-    smote_status = "OFF"
-    if apply_smote and task == "binary":
-        try:
-            sm = SMOTE(random_state=random_state)
-            X_train, y_train = sm.fit_resample(X_train, y_train)
-            smote_status = "ON"
-            print(f"[INFO] SMOTE applied → X_train shape: {X_train.shape}")
-        except Exception as e:
-            print(f"[WARNING] SMOTE skipped: {e}")
+        for model_name, model in models.items():
+            print(f"[{scaler_name} + {model_name}] Training...")
 
-    print(f"[INFO] Task: {task.upper()} | Classes: {n_classes} | Train: {X_train.shape[0]} | Test: {X_test.shape[0]}")
-    return X_train, y_train, X_test, y_test, task, smote_status
+            model_dir = os.path.join(output_dir, model_name)
+            os.makedirs(model_dir, exist_ok=True)
 
+            model.fit(X_train_scaled, y_train)
+            y_pred = model.predict(X_test_scaled)
+            y_proba = model.predict_proba(X_test_scaled)
 
-# ===========================================================================
-# MAIN EXPERIMENT LOOP – SVM
-# ===========================================================================
+            # === Accuracy luôn có ===
+            acc = accuracy_score(y_test, y_pred)
+
+            # === Metrics theo loại nhiệm vụ ===
+            if is_multiclass:
+                pre = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+                rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+                f1  = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+                
+                # ROC-AUC: One-vs-Rest
+                try:
+                    roc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='weighted')
+                except:
+                    roc = np.nan
+            else:
+                pre = precision_score(y_test, y_pred, zero_division=0)
+                rec = recall_score(y_test, y_pred, zero_division=0)
+                f1  = f1_score(y_test, y_pred, zero_division=0)
+                roc = roc_auc_score(y_test, y_proba[:, 1])
+
+            # Confusion Matrix
+            cm = confusion_matrix(y_test, y_pred)
+            tn, fp, fn, tp = (None, None, None, None)
+            if not is_multiclass and cm.size == 4:
+                tn, fp, fn, tp = cm.ravel()
+
+            results.append({
+                'Scaler': scaler_name,
+                'Model': model_name,
+                'ACC': round(acc, 4),
+                'Precision': round(pre, 4),
+                'Recall': round(rec, 4),
+                'F1': round(f1, 4),
+                'ROC-AUC': round(roc, 4) if not np.isnan(roc) else 'N/A',
+                'TP': tp, 'TN': tn, 'FP': fp, 'FN': fn
+            })
+
+            # === Vẽ ROC Curve ===
+            plt.figure(figsize=(8, 6))
+            if is_multiclass:
+                # One-vs-Rest ROC
+                from sklearn.preprocessing import label_binarize
+                y_test_bin = label_binarize(y_test, classes=classes)
+                for i, class_name in enumerate(class_names):
+                    fpr, tpr, _ = roc_curve(y_test_bin[:, i], y_proba[:, i])
+                    roc_auc_val = auc(fpr, tpr)
+                    plt.plot(fpr, tpr, lw=2, label=f'{class_name} (AUC = {roc_auc_val:.3f})')
+                plt.title(f'ROC Curve (One-vs-Rest)\n{scaler_name} + {model_name}')
+            else:
+                fpr, tpr, _ = roc_curve(y_test, y_proba[:, 1])
+                roc_auc_val = auc(fpr, tpr)
+                plt.plot(fpr, tpr, color='darkorange', lw=2,
+                         label=f'ROC curve (AUC = {roc_auc_val:.3f})')
+                plt.plot([0, 1], [0, 1], 'k--', lw=2)
+
+            plt.plot([0, 1], [0, 1], 'k--', lw=2)
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.legend(loc="lower right")
+            roc_path = os.path.join(model_dir, f"ROC_{scaler_name}_{model_name}.png")
+            plt.savefig(roc_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # === Vẽ Confusion Matrix ===
+            plt.figure(figsize=(7, 5))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                        xticklabels=class_names,
+                        yticklabels=class_names)
+            plt.title(f'Confusion Matrix\n{scaler_name} + {model_name}')
+            plt.ylabel('True Label')
+            plt.xlabel('Predicted Label')
+            cm_path = os.path.join(model_dir, f"CM_{scaler_name}_{model_name}.png")
+            plt.savefig(cm_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+    # === Lưu kết quả ===
+    results_df = pd.DataFrame(results)
+    results_df = results_df.sort_values(by='ACC', ascending=False).reset_index(drop=True)
+    csv_path = os.path.join(output_dir, f"{output_file_name}.csv")
+    results_df.to_csv(csv_path, index=False)
+
+    print(f"\nHOÀN THÀNH THÍ NGHIỆM SVM")
+    print(f"→ Loại: {'Multiclass' if is_multiclass else 'Binary'} ({n_classes} lớp)")
+    print(f"→ Kết quả lưu tại: {output_dir}")
+    print(f"→ Best Model: {results_df.iloc[0]['Model']} + {results_df.iloc[0]['Scaler']} | ACC = {results_df.iloc[0]['ACC']}")
+
+    return results_df
+
+# ====================== CHẠY THỬ ======================
 if __name__ == "__main__":
-
-    # === CHỈ CẦN ĐỔI 2 DÒNG DƯỚI ĐÂY ĐỂ CHẠY DATASET KHÁC ===
-    DATASET_PATH = "../data/processed/indian_liver_patient_preprocessed.csv"
-    # DATASET_PATH = "../data/processed/liver_cirrhosis_preprocessed.csv"
-
-    OUTPUT_CSV = "../experiment_result/svm_indian_liver_patient_result.csv"
-    # OUTPUT_CSV = "../experiment_result/svm_liver_cirrhosis_result.csv"
-
-    os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
-
-    # Header CSV
-    if not os.path.exists(OUTPUT_CSV):
-        header = (
-            "Dataset,Task,Kernel,C,Gamma,Degree,Best_CV_F1w,Test_Accuracy,Test_F1_Weighted,Test_F1_Macro,"
-            "Train_Time_s,Test_Time_s,Scaler,SMOTE,Timestamp\n"
-        )
-        with open(OUTPUT_CSV, "w", encoding="utf-8") as f:
-            f.write(header)
-
-    # Scalers
-    SCALERS = [None, "StandardScaler", "MinMaxScaler", "RobustScaler", "Normalizer", "MaxAbsScaler", "QuantileTransformer"]
-
-    # Grid SVM
-    SVM_PARAM_GRIDS = [
-        {"kernel": "linear", "C": 1.0},
-        {"kernel": "linear", "C": 10.0},
-
-        {"kernel": "rbf", "C": 10.0, "gamma": 0.5},
-        {"kernel": "rbf", "C": 10.0, "gamma": "1"},
-
-        {"kernel": "poly", "C": 10.0, "degree": 2, "gamma": "scale"},
-        {"kernel": "poly", "C": 10.0, "degree": 3, "gamma": "scale"},
-    ]
-
-    total_runs = len(SCALERS) * len(SVM_PARAM_GRIDS)
-    current_run = 0
-
-    for scaler_name in SCALERS:
-        X_train, y_train, X_test, y_test, task, smote_status = universal_preprocessing(
-            path=DATASET_PATH,
-            scaler_name=scaler_name,
-            apply_smote=True,
-            random_state=42
-        )
-
-        for params in SVM_PARAM_GRIDS:
-            current_run += 1
-            kernel = params["kernel"]
-            C = params.get("C", 1.0)
-            gamma = params.get("gamma", "-")
-            degree = params.get("degree", "-")
-
-            # Hiển thị đẹp, không lỗi khi None
-            scaler_disp = scaler_name if scaler_name else "None"
-            gamma_disp = gamma if gamma != "scale" else "scale"
-            degree_disp = str(degree) if degree != "-" else "-"
-
-            print(f"\n{'=' * 90}")
-            print(f"RUN [{current_run:>3}/{total_runs}] | "
-                  f"Scaler: {scaler_disp:<18} | Kernel: {kernel:<6} | "
-                  f"C: {C:<8} | Gamma: {gamma_disp:<8} | Degree: {degree_disp}")
-            print(f"{'=' * 90}")
-
-            # Tạo model
-            model = SVMClassifier(**params)
-
-            # 5-fold CV (dùng F1-weighted thay accuracy → chuẩn research)
-            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-            cv_scores = []
-            for train_idx, val_idx in cv.split(X_train, y_train):
-                model.fit(X_train[train_idx], y_train[train_idx])
-                pred = model.predict(X_train[val_idx])
-                cv_scores.append(f1_score(y_train[val_idx], pred, average="weighted"))
-
-            best_cv_f1 = np.mean(cv_scores)
-
-            # Train full
-            t0 = time.time()
-            model.fit(X_train, y_train)
-            train_time = time.time() - t0
-
-            # Predict
-            t0 = time.time()
-            y_pred = model.predict(X_test)
-            test_time = time.time() - t0
-
-            # Metrics
-            report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-            test_acc = report["accuracy"]
-            test_f1w = report["weighted avg"]["f1-score"]
-            test_f1m = report.get("macro avg", {}).get("f1-score", f1_score(y_test, y_pred, average="macro"))
-
-            # Lưu kết quả
-            row = [
-                os.path.basename(DATASET_PATH),
-                task,
-                kernel,
-                C,
-                gamma_disp,
-                degree_disp,
-                round(best_cv_f1, 4),
-                round(test_acc, 4),
-                round(test_f1w, 4),
-                round(test_f1m, 4),
-                round(train_time, 4),
-                round(test_time, 4),
-                scaler_disp,
-                smote_status,
-                time.strftime("%Y%m%d_%H%M%S")
-            ]
-
-            pd.DataFrame([row]).to_csv(OUTPUT_CSV, mode="a", header=False, index=False)
-
-            print(f"SAVED | CV F1w: {best_cv_f1:.4f} → Test Acc: {test_acc:.4f} | F1w: {test_f1w:.4f} | Time: {train_time+test_time:.3f}s")
-
-    print(f"\nHOÀN TẤT SVM EXPERIMENT!")
-    print(f"Kết quả đã lưu tại: {OUTPUT_CSV}")
-    print("Bây giờ bạn có bảng so sánh đầy đủ: SVM vs KNN vs RF vs Logistic")
+    # SVM for indian liver disease K_Fold = 5
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_01_experiment_result",
+    #     train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_01.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_01.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_01",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_02_experiment_result",
+    #     train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_02.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_02.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_02",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_03_experiment_result",
+    #     train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_03.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_03.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_03",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_04_experiment_result",
+    #     train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_04.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_04.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_04",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_05_experiment_result",
+    #     train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_05.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_05.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_05",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM for indian liver disease K_Fold = 5 and SMOTE
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_01_SMOTE_experiment_result",
+    #     train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_01_SMOTE.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_01.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_01_SMOTE",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_02_SMOTE_experiment_result",
+    #     train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_02_SMOTE.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_02.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_02_SMOTE",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_03_SMOTE_experiment_result",
+    #     train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_03_SMOTE.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_03.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_03_SMOTE",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_04_SMOTE_experiment_result",
+    #     train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_04_SMOTE.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_04.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_04_SMOTE",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="indian_liver_patient_k_fold_05_SMOTE_experiment_result",
+    #     train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_05_SMOTE.csv",
+    #     test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_05.csv",
+    #     output_dir="../experiment_result/indian_liver_patient/SVM/K_Fold_05_SMOTE",
+    #     label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+    #     random_state=42
+    # )
+    # SVM for liver cirhosis K_Fold = 5
+    # SVM_experiment(
+    #     output_file_name="liver_cirrhosis_k_fold_01_experiment_result",
+    #     train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_01.csv",
+    #     test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_01.csv",
+    #     output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_01",
+    #     label_col="Stage",   
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="liver_cirrhosis_k_fold_02_experiment_result",
+    #     train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_02.csv",
+    #     test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_02.csv",
+    #     output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_02",
+    #     label_col="Stage",   
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="liver_cirrhosis_k_fold_03_experiment_result",
+    #     train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_03.csv",
+    #     test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_03.csv",
+    #     output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_03",
+    #     label_col="Stage",   
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="liver_cirrhosis_k_fold_04_experiment_result",
+    #     train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_04.csv",
+    #     test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_04.csv",
+    #     output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_04",
+    #     label_col="Stage",   
+    #     random_state=42
+    # )
+    # SVM_experiment(
+    #     output_file_name="liver_cirrhosis_k_fold_05_experiment_result",
+    #     train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_05.csv",
+    #     test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_05.csv",
+    #     output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_05",
+    #     label_col="Stage",   
+    #     random_state=42
+    # )
+    # SVM for indian liver disease K_Fold = 5 and SMOTE
+    SVM_experiment(
+        output_file_name="liver_cirrhosis_k_fold_01_SMOTE_experiment_result",
+        train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_01_SMOTE.csv",
+        test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_01.csv",
+        output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_01_SMOTE",
+        label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+        random_state=42
+    )
+    SVM_experiment(
+        output_file_name="liver_cirrhosis_k_fold_02_SMOTE_experiment_result",
+        train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_02_SMOTE.csv",
+        test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_02.csv",
+        output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_02_SMOTE",
+        label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+        random_state=42
+    )
+    SVM_experiment(
+        output_file_name="liver_cirrhosis_k_fold_03_SMOTE_experiment_result",
+        train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_03_SMOTE.csv",
+        test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_03.csv",
+        output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_03_SMOTE",
+        label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+        random_state=42
+    )
+    SVM_experiment(
+        output_file_name="liver_cirrhosis_k_fold_04_SMOTE_experiment_result",
+        train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_04_SMOTE.csv",
+        test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_04.csv",
+        output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_04_SMOTE",
+        label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+        random_state=42
+    )
+    SVM_experiment(
+        output_file_name="liver_cirrhosis_k_fold_05_SMOTE_experiment_result",
+        train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_05_SMOTE.csv",
+        test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_05.csv",
+        output_dir="../experiment_result/liver_cirrhosis/SVM/K_Fold_05_SMOTE",
+        label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+        random_state=42
+    )

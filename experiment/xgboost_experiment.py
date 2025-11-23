@@ -1,215 +1,309 @@
-# ====================================================================
-# UNIVERSAL EXPERIMENT PIPELINE – XGBoost (Custom Implementation)
-# Academic / Research-Grade | Fully Automatic | Binary & Multiclass
-# ====================================================================
-
+# XGBoost_experiment.py (HOÀN CHỈNH - CHUẨN NHƯ CÁC MODEL KHÁC)
 import os
-import sys
-import time
-import numpy as np
 import pandas as pd
+import numpy as np
+import sys
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, Normalizer
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, confusion_matrix, roc_curve, auc
+)
+from sklearn.preprocessing import label_binarize
+import warnings
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+warnings.filterwarnings("ignore")
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from sklearn.preprocessing import LabelEncoder
-from sklearn.impute import SimpleImputer
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-from imblearn.over_sampling import SMOTE
-from src.XGBoost import XGBoostClassifier  # Custom XGBoost của bạn
+from models.XGBoost import XGBoostModel
 
-# ===========================================================================
-# Scaler Factory
-# ===========================================================================
-def get_scaler(name: str):
-    from sklearn.preprocessing import (StandardScaler, MinMaxScaler, RobustScaler,
-                                       Normalizer, MaxAbsScaler, QuantileTransformer)
-    scalers = {
-        "StandardScaler": StandardScaler(),
-        "MinMaxScaler": MinMaxScaler(),
-        "RobustScaler": RobustScaler(),
-        "Normalizer": Normalizer(),
-        "MaxAbsScaler": MaxAbsScaler(),
-        "QuantileTransformer": QuantileTransformer(output_distribution="normal", random_state=42),
-        None: None
-    }
-    if name not in scalers:
-        raise ValueError(f"Unsupported scaler: {name}")
-    return scalers[name]
 
-# ===========================================================================
-# Universal Preprocessing
-# ===========================================================================
-def universal_preprocessing(path: str, scaler_name="StandardScaler", apply_smote=True, random_state=42):
-    print(f"\n[INFO] Loading dataset: {os.path.basename(path)}")
-    df = pd.read_csv(path)
+def XGBoost_experiment(
+    output_file_name,
+    train_path,
+    test_path,
+    output_dir,
+    label_col="Result",
+    index_col=None,
+    scalers=None,
+    n_estimators_list=[100, 200],
+    max_depth_list=[4, 6, 8],
+    learning_rate_list=[0.05, 0.1],
+    random_state=42
+):
+    """
+    Thí nghiệm XGBoost trên dữ liệu train/test (KFold data)
+    Hỗ trợ cả binary và multiclass
+    """
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Auto-detect label column
-    possible_labels = ["Result", "Dataset", "Class", "selector", "target", "Stage", "status", "Diagnosis"]
-    label_col = next((c for c in possible_labels if c in df.columns), None)
-    if label_col is None:
-        raise ValueError("Không tìm thấy cột nhãn!")
+    # Đọc dữ liệu
+    train_df = pd.read_csv(train_path, index_col=index_col)
+    test_df  = pd.read_csv(test_path, index_col=index_col)
 
-    y_raw = df[label_col].copy()
-    unique_vals = sorted(y_raw.dropna().unique().astype(int))
+    X_train = train_df.drop(columns=[label_col])
+    y_train = train_df[label_col]
+    X_test  = test_df.drop(columns=[label_col])
+    y_test  = test_df[label_col]
 
-    if len(unique_vals) > 2 or label_col == "Stage":
-        task = "multiclass"
-        n_classes = len(unique_vals)
-        label_mapping = {old: new for new, old in enumerate(unique_vals)}
-        y = y_raw.map(label_mapping).astype(int).values
-        print(f"[INFO] Multiclass → Labels remapped: {unique_vals} → 0..{n_classes-1}")
-    else:
-        task = "binary"
-        n_classes = 2
-        pos_label = int(y_raw.max())
-        y = (y_raw == pos_label).astype(int).values
-        print(f"[INFO] Binary task → Positive class = {pos_label}")
+    # Phát hiện multiclass
+    classes = sorted(np.unique(np.concatenate([y_train.unique(), y_test.unique()])))
+    n_classes = len(classes)
+    is_multiclass = n_classes > 2
+    print(f"XGBoost Experiment | {'Multiclass' if is_multiclass else 'Binary'} ({n_classes} lớp)")
 
-    # Drop rows with missing label
-    if y_raw.isnull().any():
-        df = df.dropna(subset=[label_col]).reset_index(drop=True)
+    # Chuẩn hóa nhãn về 0,1,2,... (XGBoost yêu cầu)
+    if y_train.min() >= 1:
+        y_train = y_train - y_train.min()
+        y_test = y_test - y_test.min()
 
-    X = df.drop(columns=[label_col])
-    feature_names = X.columns.tolist()
+    class_names = [f"Stage {int(c + y_train.min())}" if "stage" in label_col.lower() else f"Class {int(c)}" for c in classes]
 
-    # Encode categorical features
-    cat_cols = X.select_dtypes(include=["object", "category"]).columns
-    for col in cat_cols:
-        X[col] = LabelEncoder().fit_transform(X[col].astype(str))
+    if scalers is None:
+        scalers = {
+            'NoScaler': None,
+            'StandardScaler': StandardScaler(),
+            'MinMaxScaler': MinMaxScaler(),
+            'RobustScaler': RobustScaler(),
+            'Normalizer': Normalizer()
+        }
 
-    # Impute numerical features
-    num_cols = X.select_dtypes(include=[np.number]).columns
-    if len(num_cols) > 0:
-        X[num_cols] = SimpleImputer(strategy="mean").fit_transform(X[num_cols])
+    results = []
 
-    # Scaling
-    scaler = get_scaler(scaler_name)
-    if scaler is not None:
-        X = scaler.fit_transform(X)
-    X = np.asarray(X, dtype=np.float64)
-    y = np.asarray(y, dtype=int)
+    for scaler_name, scaler in scalers.items():
+        X_tr = scaler.fit_transform(X_train) if scaler else X_train.values
+        X_te = scaler.transform(X_test)     if scaler else X_test.values
 
-    # Train-test split
-    stratify = y if task == "binary" or n_classes > 2 else None
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=random_state, stratify=stratify
-    )
+        for n_est in n_estimators_list:
+            for depth in max_depth_list:
+                for lr in learning_rate_list:
+                    model_name = f"XGB_n{n_est}_d{depth}_lr{lr}"
+                    print(f"[{scaler_name} + {model_name}] Training...")
 
-    # SMOTE only for binary
-    if apply_smote and task == "binary":
-        X_train, y_train = SMOTE(random_state=random_state).fit_resample(X_train, y_train)
-        print(f"[INFO] SMOTE applied → X_train shape: {X_train.shape}")
+                    model_dir = os.path.join(output_dir, model_name)
+                    os.makedirs(model_dir, exist_ok=True)
 
-    print(f"[INFO] Task: {task.upper()} | Classes: {n_classes} | Train: {X_train.shape[0]} | Test: {X_test.shape[0]}")
-    return X_train, y_train, X_test, y_test, task, feature_names, unique_vals
+                    model = XGBoostModel(
+                        n_estimators=n_est,
+                        max_depth=depth,
+                        learning_rate=lr,
+                        random_state=random_state
+                    )
+                    model.fit(X_tr, y_train)
+                    y_pred = model.predict(X_te)
+                    y_proba = model.predict_proba(X_te)
 
-# ===========================================================================
-# MAIN EXPERIMENT
-# ===========================================================================
+                    # Metrics
+                    acc = accuracy_score(y_test, y_pred)
+                    if is_multiclass:
+                        pre = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+                        rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+                        f1  = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+                        roc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='weighted')
+                    else:
+                        pre = precision_score(y_test, y_pred, zero_division=0)
+                        rec = recall_score(y_test, y_pred, zero_division=0)
+                        f1  = f1_score(y_test, y_pred, zero_division=0)
+                        roc = roc_auc_score(y_test, y_proba[:, 1])
+
+                    results.append({
+                        'Scaler': scaler_name,
+                        'n_estimators': n_est,
+                        'max_depth': depth,
+                        'learning_rate': lr,
+                        'ACC': round(acc, 4),
+                        'Precision': round(pre, 4),
+                        'Recall': round(rec, 4),
+                        'F1': round(f1, 4),
+                        'ROC-AUC': round(roc, 4)
+                    })
+
+                    # ROC Curve
+                    plt.figure(figsize=(8, 6))
+                    if is_multiclass:
+                        y_bin = label_binarize(y_test, classes=range(n_classes))
+                        for i in range(n_classes):
+                            fpr, tpr, _ = roc_curve(y_bin[:, i], y_proba[:, i])
+                            plt.plot(fpr, tpr, lw=2, label=f'{class_names[i]} (AUC={auc(fpr,tpr):.3f})')
+                        plt.title(f'ROC One-vs-Rest\n{model_name} | {scaler_name}')
+                    else:
+                        fpr, tpr, _ = roc_curve(y_test, y_proba[:, 1])
+                        plt.plot(fpr, tpr, color='darkviolet', lw=2, label=f'ROC (AUC={roc:.3f})')
+                    plt.plot([0, 1], [0, 1], 'k--', lw=2)
+                    plt.xlabel('FPR'); plt.ylabel('TPR')
+                    plt.legend(loc="lower right")
+                    plt.grid(True, alpha=0.3)
+                    plt.savefig(os.path.join(model_dir, f"ROC_{scaler_name}.png"), dpi=300, bbox_inches='tight')
+                    plt.close()
+
+                    # Confusion Matrix
+                    cm = confusion_matrix(y_test, y_pred)
+                    plt.figure(figsize=(7, 5))
+                    sns.heatmap(cm, annot=True, fmt='d', cmap='Purples',
+                                xticklabels=class_names, yticklabels=class_names)
+                    plt.title(f'Confusion Matrix\n{model_name} | {scaler_name}')
+                    plt.ylabel('True'); plt.xlabel('Predicted')
+                    plt.savefig(os.path.join(model_dir, f"CM_{scaler_name}.png"), dpi=300, bbox_inches='tight')
+                    plt.close()
+
+    # Lưu kết quả
+    results_df = pd.DataFrame(results)
+    results_df = results_df.sort_values(by='ROC-AUC', ascending=False).reset_index(drop=True)
+    csv_path = os.path.join(output_dir, f"{output_file_name}.csv")
+    results_df.to_csv(csv_path, index=False)
+
+    best = results_df.iloc[0]
+    print(f"\nHOÀN TẤT XGBoost Experiment")
+    print(f"→ Kết quả lưu tại: {output_dir}")
+    print(f"→ File CSV: {csv_path}")
+    print(f"→ BEST: n_estimators={best['n_estimators']}, depth={best['max_depth']}, lr={best['learning_rate']}, Scaler={best['Scaler']}")
+    print(f"   → ROC-AUC = {best['ROC-AUC']}, ACC = {best['ACC']}, F1 = {best['F1']}")
+
+    return results_df
+
+
 if __name__ == "__main__":
-
-    DATASET_PATH = "../data/processed/indian_liver_patient_preprocessed.csv"
-    OUTPUT_CSV   = "../experiment_result/xgboost_indian_liver_patient_result.csv"
-
-    # DATASET_PATH = "../data/processed/liver_cirrhosis_preprocessed.csv"
-    # OUTPUT_CSV   = "../experiment_result/xgboost_liver_cirrhosis_result.csv"
-
-    os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
-
-    # Header CSV - sạch sẽ, đầy đủ, không dư thừa
-    if not os.path.exists(OUTPUT_CSV):
-        header = (
-            "Dataset,Task,eta,max_depth,subsample,colsample_bytree,num_boost_round,best_iteration,"
-            "Test_Accuracy,Test_F1_Weighted,Test_F1_Macro,"
-            "Test_Precision_Weighted,Test_Recall_Weighted,"
-            "Train_Time_s,Test_Time_s,Scaler,Timestamp\n"
-        )
-        with open(OUTPUT_CSV, "w") as f:
-            f.write(header)
-
-    # Các cấu hình XGBoost muốn thử
-    XGB_CONFIGS = [
-        {"eta": 0.05, "max_depth": 6,  "subsample": 0.8, "colsample_bytree": 0.8, "num_boost_round": 1000},
-        {"eta": 0.1,  "max_depth": 8,  "subsample": 0.9, "colsample_bytree": 0.9, "num_boost_round": 800},
-        {"eta": 0.03, "max_depth": 10, "subsample": 1.0, "colsample_bytree": 1.0, "num_boost_round": 1500},
-        {"eta": 0.2,  "max_depth": 5,  "subsample": 0.7, "colsample_bytree": 0.7, "num_boost_round": 500},
-    ]
-
-    SCALERS = [None, "StandardScaler", "MinMaxScaler", "RobustScaler", "QuantileTransformer"]
-
-    for scaler_name in SCALERS:
-        X_train, y_train, X_test, y_test, task, feature_names, original_labels = universal_preprocessing(
-            path=DATASET_PATH,
-            scaler_name=scaler_name,
-            apply_smote=True,
-            random_state=42
-        )
-
-        for cfg in XGB_CONFIGS:
-            print(f"\n{'='*80}")
-            print(f"XGBoost | η={cfg['eta']:.3f} | depth={cfg['max_depth']} | "
-                  f"sub={cfg['subsample']} | col={cfg['colsample_bytree']} | Scaler: {scaler_name or 'None'}")
-            print(f"{'='*80}")
-
-            model = XGBoostClassifier(
-                eta=cfg["eta"],
-                max_depth=cfg["max_depth"],
-                subsample=cfg["subsample"],
-                colsample_bytree=cfg["colsample_bytree"],
-                num_boost_round=cfg["num_boost_round"],
-                early_stopping_rounds=50,
-                verbose=False
-            )
-
-            # Train
-            start_train = time.time()
-            model.fit(X_train, y_train, X_test, y_test)  # eval_set để early stopping
-            train_time = time.time() - start_train
-
-            # Predict
-            start_test = time.time()
-            y_pred = model.predict(X_test)
-            test_time = time.time() - start_test
-
-            # Chuyển lại nhãn gốc để báo cáo chính xác
-            if task == "multiclass":
-                y_test_orig = np.array([original_labels[i] for i in y_test])
-                y_pred_orig = np.array([original_labels[i] for i in y_pred])
-            else:
-                y_test_orig = y_test
-                y_pred_orig = y_pred
-
-            # Metrics
-            report = classification_report(y_test_orig, y_pred_orig, output_dict=True, zero_division=0)
-
-            row = [
-                os.path.basename(DATASET_PATH),
-                task,
-                cfg["eta"],
-                cfg["max_depth"],
-                cfg["subsample"],
-                cfg["colsample_bytree"],
-                cfg["num_boost_round"],
-                getattr(model.model, "best_iteration", cfg["num_boost_round"]) + 1,  # +1 vì XGBoost đếm từ 0
-                round(report["accuracy"], 4),
-                round(report["weighted avg"]["f1-score"], 4),
-                round(report["macro avg"]["f1-score"], 4),
-                round(report["weighted avg"]["precision"], 4),
-                round(report["weighted avg"]["recall"], 4),
-                round(train_time, 4),
-                round(test_time, 4),
-                scaler_name if scaler_name else "None",
-                time.strftime("%Y%m%d_%H%M%S")
-            ]
-
-            pd.DataFrame([row]).to_csv(OUTPUT_CSV, mode="a", header=False, index=False)
-
-            print(f"SAVED | Acc: {report['accuracy']:.4f} | "
-                  f"F1w: {report['weighted avg']['f1-score']:.4f} | "
-                  f"Precision_w: {report['weighted avg']['precision']:.4f} | "
-                  f"Recall_w: {report['weighted avg']['recall']:.4f} | "
-                  f"Best iter: {row[7]}")
-
-    print(f"\nHOÀN TẤT! Tất cả kết quả XGBoost đã được lưu tại:")
-    print(f" → {OUTPUT_CSV}")
-    print("Bảng kết quả sạch sẽ, đầy đủ Precision & Recall (weighted) – sẵn sàng so sánh với KNN, SVM, RF!")
+  # XGBoost experiment on KFold = 5
+  XGBoost_experiment(
+    output_file_name="indian_liver_patient_k_fold_01_experiment_result",
+    train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_01.csv",
+    test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_01.csv",
+    output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_01",
+    label_col="Result"
+  )
+  XGBoost_experiment(
+    output_file_name="indian_liver_patient_k_fold_02_experiment_result",
+    train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_02.csv",
+    test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_02.csv",
+    output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_02",
+    label_col="Result"
+  )
+  XGBoost_experiment(
+    output_file_name="indian_liver_patient_k_fold_03_experiment_result",
+    train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_03.csv",
+    test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_03.csv",
+    output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_03",
+    label_col="Result"
+  )
+  XGBoost_experiment(
+    output_file_name="indian_liver_patient_k_fold_04_experiment_result",
+    train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_04.csv",
+    test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_04.csv",
+    output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_04",
+    label_col="Result"
+  )
+  XGBoost_experiment(
+    output_file_name="indian_liver_patient_k_fold_05_experiment_result",
+    train_path="../Data/KFold_data/indian_liver_patient_train_k_fold_05.csv",
+    test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_05.csv",
+    output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_05",
+    label_col="Result"
+  )
+  # XGBoost for indian liver disease K_Fold = 5 and SMOTE
+  XGBoost_experiment(
+      output_file_name="indian_liver_patient_k_fold_01_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_01_SMOTE.csv",
+      test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_01.csv",
+      output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_01_SMOTE",
+      label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="indian_liver_patient_k_fold_02_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_02_SMOTE.csv",
+      test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_02.csv",
+      output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_02_SMOTE",
+      label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="indian_liver_patient_k_fold_03_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_03_SMOTE.csv",
+      test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_03.csv",
+      output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_03_SMOTE",
+      label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="indian_liver_patient_k_fold_04_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_04_SMOTE.csv",
+      test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_04.csv",
+      output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_04_SMOTE",
+      label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="indian_liver_patient_k_fold_05_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/indian_liver_patient_train_k_fold_05_SMOTE.csv",
+      test_path="../Data/KFold_data/indian_liver_patient_test_k_fold_05.csv",
+      output_dir="../experiment_result/indian_liver_patient/XgBoost/K_Fold_05_SMOTE",
+      label_col="Result",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  # XGBoost for liver cirhosis K_Fold = 5
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_01_experiment_result",
+      train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_01.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_01.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_01",
+      label_col="Stage",   
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_02_experiment_result",
+      train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_02.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_02.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_02",
+      label_col="Stage",   
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_03_experiment_result",
+      train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_03.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_03.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_03",
+      label_col="Stage",   
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_04_experiment_result",
+      train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_04.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_04.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_04",
+      label_col="Stage",   
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_05_experiment_result",
+      train_path="../Data/KFold_data/liver_cirrhosis_train_k_fold_05.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_05.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_05",
+      label_col="Stage",   
+  )
+  # XGBoost for indian liver disease K_Fold = 5 and SMOTE
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_01_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_01_SMOTE.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_01.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_01_SMOTE",
+      label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_02_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_02_SMOTE.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_02.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_02_SMOTE",
+      label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_03_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_03_SMOTE.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_03.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_03_SMOTE",
+      label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_04_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_04_SMOTE.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_04.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_04_SMOTE",
+      label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
+  XGBoost_experiment(
+      output_file_name="liver_cirrhosis_k_fold_05_SMOTE_experiment_result",
+      train_path="../Data/data_apply_SMOTE/KFold_data/liver_cirrhosis_train_k_fold_05_SMOTE.csv",
+      test_path="../Data/KFold_data/liver_cirrhosis_test_k_fold_05.csv",
+      output_dir="../experiment_result/liver_cirrhosis/XgBoost/K_Fold_05_SMOTE",
+      label_col="Stage",   # bạn dùng "Result" chứ không phải "Dataset"
+  )
