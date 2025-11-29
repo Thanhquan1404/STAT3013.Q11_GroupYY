@@ -1,4 +1,4 @@
-# Descriptive Analysis for Liver cirrhosis stages by loboratory and clinical Data
+# Descriptive Analysis for Liver cirrhosis stages by laboratory and clinical Data
 
 _A Statistical Exploration of Clinical Datases: Liver Cirrhosis Dataset_
 
@@ -109,3 +109,4 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
