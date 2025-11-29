@@ -1,0 +1,5 @@
+Canva link: https://www.canva.com/design/DAG55iOv_G4/feeibTWKJvsqXACJMMA2rQ/edit?utm_content=DAG55iOv_G4&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
+Github repo: https://github.com/Thanhquan1404/STAT3013.Q11_Group03.git
+dataset: 
+-Origin (417 samples): https://www.kaggle.com/datasets/fedesoriano/cirrhosis-prediction-dataset
+-Synthetic (25k samples): https://www.kaggle.com/datasets/aadarshvelu/liver-cirrhosis-stage-classification
